@@ -51,27 +51,35 @@ The stack consists of the following services:
   - `SERVICE_FQDN_FRONTEND`
   - `ADMIN_PASSWORD` (optional, defaults to "highlightadmin")
 
-## Quick Start
+## Quick Start (Coolify Deployment)
 
-1. **Clone this repository:**
+1. **Create a new service in Coolify:**
 
-   ```bash
-   git clone <repository-url>
-   cd <repository-name>
-   ```
+   - In your Coolify dashboard, create a new "Docker Compose" service
+   - Copy the contents of `template.yml` from this repository into the empty Docker Compose configuration
 
-2. **Set up environment variables:**
-   Make sure all required volume and service FQDN variables are configured in your deployment environment.
+2. **Configure required environment variables in Coolify:**
 
-3. **Start the stack:**
+   - `SERVICE_FQDN_FRONTEND`: Your frontend domain (e.g., `highlight.yourdomain.com`)
+   - `SERVICE_FQDN_BACKEND`: Your backend API domain (e.g., `highlight-api.yourdomain.com`)
+   - `ADMIN_PASSWORD`: Admin password (optional, defaults to "highlightadmin")
 
-   ```bash
-   docker-compose -f template.yml up -d
-   ```
+   Coolify will automatically set the volume variables:
+
+   - `COOLIFY_VOLUME_POSTGRES`
+   - `COOLIFY_VOLUME_CLICKHOUSE`
+   - `COOLIFY_VOLUME_KAFKA`
+   - `COOLIFY_VOLUME_REDIS`
+   - `COOLIFY_VOLUME_HIGHLIGHT_DATA`
+
+3. **Deploy the stack:**
+
+   - Click "Deploy" in Coolify to start all services
+   - Wait for all health checks to pass (especially PostgreSQL)
 
 4. **Access the application:**
-   - Frontend: `https://${SERVICE_FQDN_FRONTEND}`
-   - Backend API: `https://${SERVICE_FQDN_BACKEND}`
+   - Frontend: Your configured frontend FQDN
+   - Backend API: Your configured backend FQDN
 
 ## Configuration
 
@@ -149,25 +157,10 @@ Once running, you can:
 
 ### Logs
 
-View logs for specific services:
+**In Coolify:**
 
-```bash
-docker-compose -f template.yml logs [service-name]
-```
-
-View logs for all services:
-
-```bash
-docker-compose -f template.yml logs
-```
-
-## Development
-
-For development purposes, you can:
-
-1. Override environment variables in a `.env` file
-2. Mount local code volumes for the frontend/backend services
-3. Use development-specific image tags
+- View logs for individual services through the Coolify dashboard
+- Use the "Logs" tab for each service to monitor real-time output
 
 ## Contributing
 
