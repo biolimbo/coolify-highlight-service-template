@@ -1,0 +1,168 @@
+version: "3.8"
+
+############################
+#  shared Highlight env    #
+############################
+x-highlight-env: &highlight-env
+  ENVIRONMENT: dev
+  IN_DOCKER: "true"
+
+  # ---------- Postgres ----------
+  PSQL_HOST: postgres
+  PSQL_PORT: "5432"
+  PSQL_USER: postgres
+  PSQL_PASSWORD: postgres
+  PSQL_DB: postgres
+
+  # ---------- ClickHouse ----------
+  CLICKHOUSE_ADDRESS: clickhouse:9000
+  CLICKHOUSE_DATABASE: highlight
+  CLICKHOUSE_USERNAME: default
+  CLICKHOUSE_PASSWORD: ""
+
+  # ---------- Kafka / Redis ----------
+  KAFKA_SERVERS: kafka:9092
+  REDIS_ENDPOINT: redis:6379
+  REDIS_PASSWORD: ""
+
+############################
+#  infrastructure stack    #
+############################
+services:
+  postgres:
+    image: ankane/pgvector:v0.5.1
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: >
+      bash -c "if [ -f \"$PGDATA/pg_hba.conf\" ] &&
+                 ! grep -qxF 'host all all all trust' \"$PGDATA/pg_hba.conf\"; then
+                 echo 'host all all all trust' >> \"$PGDATA/pg_hba.conf\"; fi;
+               exec docker-entrypoint.sh postgres"
+    volumes:
+      - ${COOLIFY_VOLUME_POSTGRES}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [highlight]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24
+    restart: always
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # ⬇ create DB highlight if it doesn't exist
+    command: >
+      bash -c "
+        /entrypoint.sh clickhouse-server &
+        pid=$$!;
+        # wait for server to accept connections
+        until clickhouse client --query 'SELECT 1' >/dev/null 2>&1; do sleep 1; done;
+        clickhouse client --query 'CREATE DATABASE IF NOT EXISTS highlight';
+        wait $pid
+      "
+    volumes:
+      - ${COOLIFY_VOLUME_CLICKHOUSE}:/var/lib/clickhouse
+    networks: [highlight]
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.0
+    restart: always
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks: [highlight]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    restart: always
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - ${COOLIFY_VOLUME_KAFKA}:/var/lib/kafka/data
+    networks: [highlight]
+
+  redis:
+    image: redis:7
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ${COOLIFY_VOLUME_REDIS}:/data
+    networks: [highlight]
+
+  ############################
+  #          backend         #
+  ############################
+  highlight-backend:
+    image: ghcr.io/highlight/highlight-backend:latest
+    restart: always
+    environment:
+      <<: *highlight-env
+      SERVICE_FQDN_BACKEND:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-highlightadmin}
+      SSL: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+    volumes:
+      - ${COOLIFY_VOLUME_HIGHLIGHT_DATA}:/highlight-data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.highlight-backend.rule=Host(`${SERVICE_FQDN_BACKEND}`)
+      - traefik.http.services.highlight-backend.loadbalancer.server.port=8082
+    healthcheck:
+      disable: true
+    networks: [highlight]
+
+  ############################
+  #          frontend        #
+  ############################
+  highlight-frontend:
+    image: ghcr.io/highlight/highlight-frontend:latest
+    restart: always
+    environment:
+      <<: *highlight-env
+      SERVICE_FQDN_FRONTEND:
+      REACT_APP_PRIVATE_GRAPH_URI: http://highlight-backend:8082/private
+      REACT_APP_PUBLIC_GRAPH_URI: http://highlight-backend:8082/public
+      REACT_APP_FRONTEND_URI: ${SERVICE_FQDN_FRONTEND}
+    depends_on: [highlight-backend]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.highlight-frontend.rule=Host(`${SERVICE_FQDN_FRONTEND}`)
+      - traefik.http.services.highlight-frontend.loadbalancer.server.port=3000
+    networks: [highlight]
+
+############################
+#  networks & volumes      #
+############################
+networks:
+  highlight:
+    driver: bridge
+
+volumes:
+  ${COOLIFY_VOLUME_POSTGRES}:
+  ${COOLIFY_VOLUME_CLICKHOUSE}:
+  ${COOLIFY_VOLUME_KAFKA}:
+  ${COOLIFY_VOLUME_REDIS}:
+  ${COOLIFY_VOLUME_HIGHLIGHT_DATA}:
