@@ -1,0 +1,381 @@
+version: "3.8"
+
+############################
+#     Highlight Stack      #
+############################
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.0
+    restart: always
+    environment:
+      - "ZOOKEEPER_CLIENT_PORT=2181"
+      - "ZOOKEEPER_TICK_TIME=2000"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    networks: [highlight]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    restart: always
+    depends_on: [zookeeper]
+    environment:
+      - "KAFKA_BROKER_ID=1"
+      - "KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181"
+      - "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092"
+      - "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT"
+      - "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1"
+      - "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1"
+      - "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1"
+      - "KAFKA_AUTO_CREATE_TOPICS_ENABLE=true"
+      - "KAFKA_MESSAGE_MAX_BYTES=50000000"
+      - "KAFKA_REPLICA_FETCH_MAX_BYTES=50000000"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "kafka-broker-api-versions",
+          "--bootstrap-server",
+          "localhost:9092",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [highlight]
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    environment:
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:-}"
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--save"
+      - "60"
+      - "1"
+      - "--loglevel"
+      - "warning"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [highlight]
+
+  postgres:
+    image: ankane/pgvector:v0.5.1
+    restart: always
+    environment:
+      - "POSTGRES_USER=${POSTGRES_USER:-postgres}"
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}"
+      - "POSTGRES_DB=${POSTGRES_DB:-postgres}"
+      - "POSTGRES_HOST_AUTH_METHOD=trust"
+    command: >
+      bash -c "if [ -f \"$PGDATA/pg_hba.conf\" ] &&
+                 ! grep -qxF 'host all all all trust' \"$PGDATA/pg_hba.conf\"; then
+                 echo 'host all all all trust' >> \"$PGDATA/pg_hba.conf\"; fi;
+               exec docker-entrypoint.sh postgres"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [highlight]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    restart: always
+    environment:
+      - "CLICKHOUSE_SKIP_USER_SETUP=1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+      - type: bind
+        source: ./clickhouse/init-db.sql
+        target: /docker-entrypoint-initdb.d/init-db.sql
+        read_only: true
+        content: |
+          CREATE DATABASE IF NOT EXISTS highlight;
+      - type: bind
+        source: ./clickhouse/config.xml
+        target: /etc/clickhouse-server/config.d/logging.xml
+        read_only: true
+        content: |
+          <clickhouse>
+              <backups>
+                  <allowed_path>/backups/</allowed_path>
+                  <remove_backup_files_after_failure>true</remove_backup_files_after_failure>
+              </backups>
+              <asynchronous_metric_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </asynchronous_metric_log>
+              <metric_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </metric_log>
+              <query_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </query_log>
+              <query_thread_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </query_thread_log>
+              <trace_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </trace_log>
+              <crash_log>
+                  <ttl>event_date + INTERVAL 1 MONTH DELETE</ttl>
+              </crash_log>
+              <text_log>
+                  <ttl>event_date + INTERVAL 1 MONTH DELETE</ttl>
+              </text_log>
+              <backup_log>
+                  <ttl>event_date + INTERVAL 1 MONTH DELETE</ttl>
+              </backup_log>
+              <part_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </part_log>
+              <processors_profile_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </processors_profile_log>
+              <query_views_log>
+                  <ttl>event_date + INTERVAL 1 HOUR DELETE</ttl>
+              </query_views_log>
+          </clickhouse>
+      - type: bind
+        source: ./clickhouse/users.xml
+        target: /etc/clickhouse-server/users.d/users.xml
+        read_only: true
+        content: |
+          <clickhouse>
+              <users>
+                  <default>
+                      <profile>default</profile>
+                  </default>
+              </users>
+              <profiles>
+                  <default>
+                      <query_profiler_real_time_period_ns>1000000000</query_profiler_real_time_period_ns>
+                      <query_profiler_cpu_time_period_ns>1000000000</query_profiler_cpu_time_period_ns>
+                  </default>
+              </profiles>
+          </clickhouse>
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks: [highlight]
+
+  ############################
+  #       Highlight App      #
+  ############################
+  highlight-backend:
+    image: ghcr.io/highlight/highlight-backend:latest
+    restart: always
+    environment:
+      - SERVICE_FQDN_BACKEND
+      - "ENVIRONMENT=${ENVIRONMENT:-dev}"
+      - "IN_DOCKER=true"
+      - "PSQL_HOST=postgres"
+      - "PSQL_PORT=5432"
+      - "PSQL_USER=${POSTGRES_USER:-postgres}"
+      - "PSQL_PASSWORD=${POSTGRES_PASSWORD:-postgres}"
+      - "PSQL_DB=${POSTGRES_DB:-postgres}"
+      - "CLICKHOUSE_ADDRESS=clickhouse:9000"
+      - "CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-highlight}"
+      - "CLICKHOUSE_USERNAME=${CLICKHOUSE_USERNAME:-default}"
+      - "CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}"
+      - "KAFKA_SERVERS=kafka:9092"
+      - "REDIS_ENDPOINT=redis:6379"
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:-}"
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:-highlightadmin}"
+      - "SSL=false"
+      - "REACT_APP_AUTH_MODE=${AUTH_MODE:-Simple}"
+      - "OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}"
+      - "OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}"
+      - "FRONTEND_URI=${SERVICE_FQDN_FRONTEND}"
+      - "PRIVATE_GRAPH_URI=http://highlight-backend:8082/private"
+      - "PUBLIC_GRAPH_URI=http://highlight-backend:8082/public"
+      - "OTLP_ENDPOINT=http://highlight-collector:4318"
+      - "OTLP_DOGFOOD_ENDPOINT=http://highlight-collector:4318"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - highlight-data:/highlight-data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.highlight-backend.rule=Host(`${SERVICE_FQDN_BACKEND}`)
+      - traefik.http.services.highlight-backend.loadbalancer.server.port=8082
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks: [highlight]
+
+  highlight-frontend:
+    image: ghcr.io/highlight/highlight-frontend:latest
+    restart: always
+    environment:
+      - SERVICE_FQDN_FRONTEND
+      - "ENVIRONMENT=${ENVIRONMENT:-dev}"
+      - "IN_DOCKER=true"
+      - "REACT_APP_PRIVATE_GRAPH_URI=http://highlight-backend:8082/private"
+      - "REACT_APP_PUBLIC_GRAPH_URI=http://highlight-backend:8082/public"
+      - "REACT_APP_FRONTEND_URI=${SERVICE_FQDN_FRONTEND}"
+      - "REACT_APP_AUTH_MODE=${AUTH_MODE:-Simple}"
+    depends_on:
+      - highlight-backend
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.highlight-frontend.rule=Host(`${SERVICE_FQDN_FRONTEND}`)
+      - traefik.http.services.highlight-frontend.loadbalancer.server.port=3000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks: [highlight]
+
+  highlight-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    restart: always
+    environment:
+      - "OTEL_EXPORTER_OTLP_ENDPOINT=http://highlight-backend:8082/otel"
+      - "OTEL_EXPORTER_OTLP_INSECURE=true"
+    depends_on:
+      - highlight-backend
+    volumes:
+      - type: bind
+        source: ./collector.yml
+        target: /etc/otelcol-contrib/config.yaml
+        read_only: true
+        content: |
+          receivers:
+            fluentforward:
+              endpoint: '0.0.0.0:24224'
+            tcplog:
+              listen_address: '0.0.0.0:34302'
+              add_attributes: true
+              operators:
+                - type: json_parser
+                  on_error: drop
+            awsfirehose/cwmetrics:
+              endpoint: 0.0.0.0:4433
+              record_type: cwmetrics
+            awsfirehose/cwlogs:
+              endpoint: 0.0.0.0:8433
+              record_type: cwlogs
+            syslog:
+              udp:
+                listen_address: '0.0.0.0:6513'
+              tcp:
+                listen_address: '0.0.0.0:6514'
+              protocol: rfc5424
+              location: UTC
+              retry_on_failure:
+                enabled: true
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+
+          processors:
+            memory_limiter:
+              check_interval: 1s
+              limit_mib: 14336
+              spike_limit_mib: 1024
+            batch:
+              send_batch_size: 10000
+              timeout: 10s
+              send_batch_max_size: 10000
+            attributes:
+              actions:
+                - key: highlight.project_id
+                  value: 1
+                  action: insert
+
+          exporters:
+            debug:
+              verbosity: detailed
+            otlphttp:
+              endpoint: http://highlight-backend:8082/otel
+              compression: none
+              tls:
+                insecure: true
+              retry_on_failure:
+                enabled: true
+                initial_interval: 1s
+                randomization_factor: 0.7
+                multiplier: 1.3
+                max_interval: 120s
+                max_elapsed_time: 1800s
+              sending_queue:
+                enabled: true
+                num_consumers: 10
+                queue_size: 5000
+
+          service:
+            pipelines:
+              traces:
+                receivers: [otlp]
+                processors: [memory_limiter, batch, attributes]
+                exporters: [otlphttp, debug]
+              metrics:
+                receivers: [otlp, awsfirehose/cwmetrics]
+                processors: [memory_limiter, batch, attributes]
+                exporters: [otlphttp, debug]
+              logs:
+                receivers: [otlp, fluentforward, awsfirehose/cwlogs, syslog, tcplog]
+                processors: [memory_limiter, batch, attributes]
+                exporters: [otlphttp, debug]
+    networks: [highlight]
+
+############################
+#   Networks & Volumes     #
+############################
+networks:
+  highlight:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  clickhouse-logs:
+  redis-data:
+  kafka-data:
+  zookeeper-data:
+  zookeeper-log:
+  highlight-data:

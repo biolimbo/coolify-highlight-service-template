@@ -9,16 +9,17 @@
 > 🤝 **Open to Collaboration** 🤝  
 > This project welcomes contributions! Feel free to submit pull requests, report issues, or suggest improvements.
 
-This repository contains a Docker Compose configuration for running the Highlight application stack, which includes a full observability and monitoring platform with session replay, error tracking, and performance monitoring capabilities.
+This repository contains a Docker Compose configuration for running the Highlight application stack, which includes a full observability and monitoring platform with OpenTelemetry collection, error tracking, and performance monitoring capabilities.
 
 ## Overview
 
 Highlight is an open-source observability platform that provides:
 
-- Session replay and user analytics
+- Full OpenTelemetry (OTEL) support for traces, metrics, and logs
 - Error tracking and monitoring
 - Performance monitoring and metrics
 - Real-time debugging capabilities
+- Multiple log ingestion protocols (Fluent Forward, Syslog, AWS Firehose)
 
 ## Architecture
 
@@ -28,49 +29,43 @@ The stack consists of the following services:
 
 - **highlight-frontend**: React-based web interface (port 3000)
 - **highlight-backend**: Backend API service (port 8082)
+- **highlight-collector**: OpenTelemetry Collector for ingesting observability data
 
 ### Infrastructure Services
 
-- **postgres**: PostgreSQL database with pgvector extension for vector operations
-- **clickhouse**: ClickHouse database for analytics and time-series data
-- **kafka**: Apache Kafka for message streaming
-- **zookeeper**: Apache Zookeeper for Kafka coordination
-- **redis**: Redis for caching and session storage
+- **postgres**: PostgreSQL database with pgvector extension (ankane/pgvector:v0.5.1)
+- **clickhouse**: ClickHouse database for analytics and time-series data (clickhouse-server:24.12-alpine)
+- **kafka**: Apache Kafka for message streaming (confluentinc/cp-kafka:7.7.0)
+- **zookeeper**: Apache Zookeeper for Kafka coordination (confluentinc/cp-zookeeper:7.7.0)
+- **redis**: Redis for caching and session storage (redis:7-alpine)
 
 ## Prerequisites
 
 - Docker and Docker Compose installed
 - At least 4GB of available RAM
 - The following environment variables configured in your deployment platform (e.g., Coolify):
-  - `COOLIFY_VOLUME_POSTGRES`
-  - `COOLIFY_VOLUME_CLICKHOUSE`
-  - `COOLIFY_VOLUME_KAFKA`
-  - `COOLIFY_VOLUME_REDIS`
-  - `COOLIFY_VOLUME_HIGHLIGHT_DATA`
-  - `SERVICE_FQDN_BACKEND`
-  - `SERVICE_FQDN_FRONTEND`
+  - `SERVICE_FQDN_BACKEND`: Backend API domain
+  - `SERVICE_FQDN_FRONTEND`: Frontend domain
   - `ADMIN_PASSWORD` (optional, defaults to "highlightadmin")
+  - `ENVIRONMENT` (optional, defaults to "dev")
+  - `AUTH_MODE` (optional, defaults to "Simple")
 
 ## Quick Start (Coolify Deployment)
 
 1. **Create a new service in Coolify:**
 
    - In your Coolify dashboard, create a new "Docker Compose" service
-   - Copy the contents of `template.yml` from this repository into the empty Docker Compose configuration
+   - Copy the contents of `docker-compose.yml` from this repository into the empty Docker Compose configuration
 
 2. **Configure required environment variables in Coolify:**
 
    - `SERVICE_FQDN_FRONTEND`: Your frontend domain (e.g., `highlight.yourdomain.com`)
    - `SERVICE_FQDN_BACKEND`: Your backend API domain (e.g., `highlight-api.yourdomain.com`)
    - `ADMIN_PASSWORD`: Admin password (optional, defaults to "highlightadmin")
+   - `ENVIRONMENT`: Environment name (optional, defaults to "dev")
+   - `AUTH_MODE`: Authentication mode (optional, defaults to "Simple")
 
-   Coolify will automatically set the volume variables:
-
-   - `COOLIFY_VOLUME_POSTGRES`
-   - `COOLIFY_VOLUME_CLICKHOUSE`
-   - `COOLIFY_VOLUME_KAFKA`
-   - `COOLIFY_VOLUME_REDIS`
-   - `COOLIFY_VOLUME_HIGHLIGHT_DATA`
+   Coolify will automatically create volumes for persistent data storage
 
 3. **Deploy the stack:**
 
@@ -85,15 +80,18 @@ The stack consists of the following services:
 
 ### Environment Variables
 
-The stack uses a shared environment configuration (`x-highlight-env`) that includes:
+The stack includes the following key environment configurations:
 
 - **Database Configuration:**
-  - PostgreSQL: `postgres:5432`
-  - ClickHouse: `clickhouse:9000`
+  - PostgreSQL: `postgres:5432` with pgvector extension
+  - ClickHouse: `clickhouse:9000` for time-series data
 - **Message Queue:**
-  - Kafka: `kafka:9092`
+  - Kafka: `kafka:9092` with Zookeeper coordination
 - **Cache:**
-  - Redis: `redis:6379`
+  - Redis: `redis:6379` with persistence enabled
+- **OpenTelemetry Collection:**
+  - OTLP endpoints for traces, metrics, and logs
+  - Multiple ingestion protocols supported
 
 ### Default Credentials
 
@@ -108,20 +106,29 @@ The stack uses a shared environment configuration (`x-highlight-env`) that inclu
 
 ## Health Checks
 
-The stack includes health checks for:
+The stack includes comprehensive health checks for:
 
-- PostgreSQL: Ensures database is ready before starting dependent services
-- All other services have dependency management to ensure proper startup order
+- **PostgreSQL**: Database readiness check with pg_isready
+- **ClickHouse**: HTTP ping endpoint check
+- **Kafka**: Broker API version check
+- **Redis**: Redis CLI ping check
+- **Backend**: HTTP health endpoint check
+- **Frontend**: HTTP root endpoint check
+
+All services have proper dependency management to ensure correct startup order
 
 ## Volumes
 
 The following volumes are used for persistent data:
 
-- `${COOLIFY_VOLUME_POSTGRES}`: PostgreSQL data
-- `${COOLIFY_VOLUME_CLICKHOUSE}`: ClickHouse data
-- `${COOLIFY_VOLUME_KAFKA}`: Kafka data
-- `${COOLIFY_VOLUME_REDIS}`: Redis data
-- `${COOLIFY_VOLUME_HIGHLIGHT_DATA}`: Highlight application data
+- `postgres-data`: PostgreSQL data
+- `clickhouse-data`: ClickHouse data
+- `clickhouse-logs`: ClickHouse logs
+- `kafka-data`: Kafka data
+- `zookeeper-data`: Zookeeper data
+- `zookeeper-log`: Zookeeper logs
+- `redis-data`: Redis data
+- `highlight-data`: Highlight application data
 
 ## Networking
 
@@ -132,8 +139,13 @@ All services communicate through a custom bridge network named `highlight`.
 Once running, you can:
 
 1. Access the Highlight dashboard through the frontend URL
-2. Configure your applications to send data to the backend API
-3. Monitor application performance, errors, and user sessions
+2. Configure your applications to send telemetry data via:
+   - OpenTelemetry Protocol (OTLP) on ports 4317 (gRPC) and 4318 (HTTP)
+   - Fluent Forward protocol on port 24224
+   - Syslog (RFC5424) on ports 6513 (UDP) and 6514 (TCP)
+   - AWS Firehose for CloudWatch metrics (port 4433) and logs (port 8433)
+   - TCP log ingestion on port 34302
+3. Monitor application performance, errors, and logs
 4. Set up alerts and notifications
 
 ## Troubleshooting
@@ -152,8 +164,15 @@ Once running, you can:
    - Check network connectivity between services
 
 3. **Frontend not loading:**
+
    - Verify backend service is running and healthy
    - Check that FQDN variables are correctly configured
+   - Ensure all health checks are passing
+
+4. **OpenTelemetry data not appearing:**
+   - Verify the collector service is running
+   - Check that your application is configured to send data to the correct OTLP endpoints
+   - Review collector logs for any ingestion errors
 
 ### Logs
 
