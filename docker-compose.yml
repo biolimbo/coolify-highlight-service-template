@@ -6,19 +6,34 @@ version: "3.8"
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.7.0
-    restart: always
+    container_name: highlight-zookeeper
+    restart: unless-stopped
     environment:
       - "ZOOKEEPER_CLIENT_PORT=2181"
       - "ZOOKEEPER_TICK_TIME=2000"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
       - zookeeper-log:/var/lib/zookeeper/log
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -f http://localhost:8080/commands/ruok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     networks: [highlight]
 
   kafka:
     image: confluentinc/cp-kafka:7.7.0
-    restart: always
-    depends_on: [zookeeper]
+    container_name: highlight-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
     environment:
       - "KAFKA_BROKER_ID=1"
       - "KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181"
@@ -30,8 +45,18 @@ services:
       - "KAFKA_AUTO_CREATE_TOPICS_ENABLE=true"
       - "KAFKA_MESSAGE_MAX_BYTES=50000000"
       - "KAFKA_REPLICA_FETCH_MAX_BYTES=50000000"
+      - "KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=60000"
+      - "KAFKA_ZOOKEEPER_SESSION_TIMEOUT_MS=6000"
+      - "KAFKA_ZOOKEEPER_CONNECTION_TIMEOUT_MS=6000"
+    command: >
+      bash -c "rm -rf /var/lib/kafka/data/meta.properties 2>/dev/null || true;
+               /etc/confluent/docker/run"
     volumes:
       - kafka-data:/var/lib/kafka/data
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
     healthcheck:
       test:
         [
@@ -48,9 +73,10 @@ services:
 
   redis:
     image: redis:7-alpine
-    restart: always
+    container_name: highlight-redis
+    restart: unless-stopped
     environment:
-      - "REDIS_PASSWORD=${REDIS_PASSWORD:-}"
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:-redispassword}"
     command:
       - "redis-server"
       - "--appendonly"
@@ -60,18 +86,30 @@ services:
       - "1"
       - "--loglevel"
       - "warning"
+      - "--bind"
+      - "0.0.0.0"
+      - "--protected-mode"
+      - "no"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:-redispassword}"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
     networks: [highlight]
 
   postgres:
     image: ankane/pgvector:v0.5.1
-    restart: always
+    container_name: highlight-postgres
+    restart: unless-stopped
     environment:
       - "POSTGRES_USER=${POSTGRES_USER:-postgres}"
       - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}"
@@ -93,11 +131,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
     networks: [highlight]
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.12-alpine
-    restart: always
+    container_name: highlight-clickhouse
+    restart: unless-stopped
     environment:
       - "CLICKHOUSE_SKIP_USER_SETUP=1"
     volumes:
@@ -108,7 +151,7 @@ services:
         target: /docker-entrypoint-initdb.d/init-db.sql
         read_only: true
         content: |
-          CREATE DATABASE IF NOT EXISTS highlight;
+          CREATE DATABASE IF NOT EXISTS default;
       - type: bind
         source: ./clickhouse/config.xml
         target: /etc/clickhouse-server/config.d/logging.xml
@@ -172,9 +215,14 @@ services:
               </profiles>
           </clickhouse>
     ulimits:
+      nproc: 65535
       nofile:
         soft: 262144
         hard: 262144
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
     healthcheck:
       test:
         [
@@ -187,38 +235,65 @@ services:
       start_period: 30s
     networks: [highlight]
 
-  ############################
-  #       Highlight App      #
-  ############################
   highlight-backend:
     image: ghcr.io/highlight/highlight-backend:latest
-    restart: always
+    container_name: highlight-backend
+    restart: unless-stopped
     environment:
-      - SERVICE_FQDN_BACKEND
+      - SERVICE_FQDN_BACKEND_8082
       - "ENVIRONMENT=${ENVIRONMENT:-dev}"
       - "IN_DOCKER=true"
+      - "IN_DOCKER_GO=true"
+      - "ON_PREM=true"
+      - "GOMEMLIMIT=16GiB"
+      - "KAFKA_TOPIC=dev"
+      - "OBJECT_STORAGE_FS=/highlight-data"
+      - "RENDER_PREVIEW=true"
       - "PSQL_HOST=postgres"
+      - "PSQL_DOCKER_HOST=postgres"
       - "PSQL_PORT=5432"
       - "PSQL_USER=${POSTGRES_USER:-postgres}"
       - "PSQL_PASSWORD=${POSTGRES_PASSWORD:-postgres}"
       - "PSQL_DB=${POSTGRES_DB:-postgres}"
       - "CLICKHOUSE_ADDRESS=clickhouse:9000"
-      - "CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-highlight}"
+      - "CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-default}"
       - "CLICKHOUSE_USERNAME=${CLICKHOUSE_USERNAME:-default}"
       - "CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}"
       - "KAFKA_SERVERS=kafka:9092"
+      - "KAFKA_CONSUMER_SESSION_TIMEOUT=30000"
+      - "KAFKA_CONSUMER_REBALANCE_TIMEOUT=30000"
       - "REDIS_ENDPOINT=redis:6379"
-      - "REDIS_PASSWORD=${REDIS_PASSWORD:-}"
-      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:-highlightadmin}"
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:-redispassword}"
+      - "REDIS_EVENTS_STAGING_ENDPOINT=redis:6379"
+      - "REDIS_HOST=redis"
+      - "REDIS_PORT=6379"
+      - "REDIS_ADDR=redis:6379"
+      - "CACHE_REDIS_HOST=redis"
+      - "CACHE_REDIS_PORT=6379"
+      - "WORKER_REDIS_ADDR=redis:6379"
+      - "REDIS_EVENTS_QUEUE_ADDR=redis:6379"
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:-password}"
       - "SSL=false"
       - "REACT_APP_AUTH_MODE=${AUTH_MODE:-Simple}"
+      - "AUTH_MODE=${AUTH_MODE:-Simple}"
       - "OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}"
       - "OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}"
-      - "FRONTEND_URI=${SERVICE_FQDN_FRONTEND}"
+      - "FRONTEND_URI=${SERVICE_FQDN_FRONTEND_3000}"
       - "PRIVATE_GRAPH_URI=http://highlight-backend:8082/private"
       - "PUBLIC_GRAPH_URI=http://highlight-backend:8082/public"
       - "OTLP_ENDPOINT=http://highlight-collector:4318"
       - "OTLP_DOGFOOD_ENDPOINT=http://highlight-collector:4318"
+      - "GODEBUG=netdns=go"
+      - "DEFAULT_PROJECT_ID=1"
+      - "DEFAULT_WORKSPACE_ID=1"
+      - "DEMO_PROJECT_ID=1"
+      - "LICENSE_KEY="
+      - "DOPPLER_CONFIG=docker"
+      - "BACKEND_HEALTH_URI=http://highlight-backend:8082/health"
+      - "MIGRATION_TIMEOUT=300"
+      - "SEED_ADMIN_EMAIL=admin@highlight.io"
+      - "SEED_ADMIN_PASSWORD=${ADMIN_PASSWORD:-password}"
+      - "SKIP_MIGRATION_CHECK=false"
     depends_on:
       postgres:
         condition: service_healthy
@@ -227,6 +302,8 @@ services:
       kafka:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      highlight-collector:
         condition: service_healthy
     volumes:
       - highlight-data:/highlight-data
@@ -240,41 +317,55 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
     networks: [highlight]
 
   highlight-frontend:
     image: ghcr.io/highlight/highlight-frontend:latest
-    restart: always
+    container_name: highlight-frontend
+    restart: unless-stopped
     environment:
-      - SERVICE_FQDN_FRONTEND
+      - SERVICE_FQDN_FRONTEND_3000
       - "ENVIRONMENT=${ENVIRONMENT:-dev}"
       - "IN_DOCKER=true"
+      - "REACT_APP_IN_DOCKER=true"
       - "REACT_APP_PRIVATE_GRAPH_URI=http://highlight-backend:8082/private"
       - "REACT_APP_PUBLIC_GRAPH_URI=http://highlight-backend:8082/public"
-      - "REACT_APP_FRONTEND_URI=${SERVICE_FQDN_FRONTEND}"
+      - "REACT_APP_FRONTEND_URI=${SERVICE_FQDN_FRONTEND_3000}"
       - "REACT_APP_AUTH_MODE=${AUTH_MODE:-Simple}"
+      - "REACT_APP_DISABLE_ANALYTICS=false"
+      - "REACT_APP_FRONTEND_ORG=1"
+      - "REACT_APP_OTLP_ENDPOINT=http://highlight-collector:4318"
     depends_on:
-      - highlight-backend
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.highlight-frontend.rule=Host(`${SERVICE_FQDN_FRONTEND}`)
-      - traefik.http.services.highlight-frontend.loadbalancer.server.port=3000
+      highlight-backend:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
     networks: [highlight]
 
   highlight-collector:
     image: otel/opentelemetry-collector-contrib:latest
-    restart: always
+    container_name: highlight-collector
+    restart: unless-stopped
     environment:
       - "OTEL_EXPORTER_OTLP_ENDPOINT=http://highlight-backend:8082/otel"
       - "OTEL_EXPORTER_OTLP_INSECURE=true"
     depends_on:
-      - highlight-backend
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     volumes:
       - type: bind
         source: ./collector.yml
@@ -347,7 +438,13 @@ services:
                 num_consumers: 10
                 queue_size: 5000
 
+          extensions:
+            health_check:
+              endpoint: '0.0.0.0:4319'
+              path: '/health/status'
+
           service:
+            extensions: [health_check]
             pipelines:
               traces:
                 receivers: [otlp]
@@ -361,6 +458,20 @@ services:
                 receivers: [otlp, fluentforward, awsfirehose/cwlogs, syslog, tcplog]
                 processors: [memory_limiter, batch, attributes]
                 exporters: [otlphttp, debug]
+    logging:
+      options:
+        max-size: 50m
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:4319/health/status || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks: [highlight]
 
 ############################
